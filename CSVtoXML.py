@@ -10,10 +10,47 @@ from tkinter import messagebox
 import math
 from xml.sax.handler import ContentHandler
 from xml.sax import make_parser
+import xml.dom.minidom
 
 # version
-tool_version = "4.3.1"
-#patch 2019-12-07 to correct regex for finding # of personal name subjects
+tool_version = "Arca CSVtoXML 5.0.0"
+
+# pyinstaller --onefile --noconsole --icon convert.ico CSVtoXMLv5.py
+#update 2020-06-07 
+#prettified using xml.dom.minidom
+#revised method that deletes blank columns
+#updated for use with MMW 18-6 (combined personal and family names)
+
+#update 2020-05-22
+#fixed bug (dateIssued duplication)
+
+#update 2020-05-22
+#appended _MODS to filenames constructed from the Arca PID
+
+#update 2020-05-21
+#removed prettification
+#refactored code
+
+#update 2020-05-20
+#integrated content models
+#fixed bug with prettification
+#added cleaning of additional non-utf-8 characters
+
+#update 2020-05-14
+#prettifies XML so that label will be updated on ingest.
+#still for use with Master Metadata Workbook 18-5 only 
+#will not accept metadata with whole-name (combined given name and family name) fields
+#gives pop-up error message if CSV is empty or contains incompatible metadata
+
+#update 2020-02-27
+#checked for NoneType in contributor given name and subbed empty string if None
+#inserted obligatory question marks around "uri" in <identifier type=uri>
+
+#update 2020-02-14
+#adjustment to accommodate multiple languages + backward compatibility for CorporateCreator 
+#(as well as CorporateCreator_1 and CorporateCreator_2)
+#fixed error in getting Corporate Subject from the input CSV
+#added URI
 # supported content models
     #book
     #large image
@@ -21,6 +58,11 @@ tool_version = "4.3.1"
     #video
     #newspaper (as a whole) 
     #news issue
+
+#pyinstaller command:
+
+
+
 #infer desktop
 desktopPath = os.path.expanduser("~/Desktop/")
 csvname = ""
@@ -28,7 +70,6 @@ filelist=['',None]
 #----------------------------------------------------------------------
    
 def validate(savePath):
-    probFiles = ""
     def parsefile(file):
         parser = make_parser()
         parser.setContentHandler(ContentHandler())
@@ -39,52 +80,70 @@ def validate(savePath):
             parsefile(str(filename))
     
         except:
-            probFiles += "\n" + str(os.path.basename(filename))
-    return probFiles
-
+            probFiles += "\n" + str(os.path.basename(filename)) + " was not well formed."
+    #return probFiles
        
 def browse_button1():  
     # Allow user to select a directory and store it in global var
     # called folder_path1
+
     lbl1['text'] = ""
     csvname =  filedialog.askopenfilename(initialdir = desktopPath,title = "Select file",filetypes = (("csv files","*.csv"),("all files","*.*")))
     filelist[0] = csvname
     lbl1['text'] = csvname
+ 
+def dropNullCols(df):
+    nullcols = []
+    for col in df.columns:
+        notNull = df[col].notna().sum()
+        if notNull < 2:
+            nullcols.append(col)
+    return nullcols 
    
 def convert():
-    contentMod = "default"
+    #list of problem files
+    probFiles = ''
     download = False
     filename = filelist[0]
     outputFldr = getOutputFolder()
+
     # Set default output folder
-    if (len(outputFldr) < 1) or outputFldr == None:
+    if (len(outputFldr) < 1) or outputFldr is None:
         outputFldr = "CSVtoXML_Output"
     savePath = os.path.join(desktopPath,outputFldr)
     if not os.path.exists(savePath):    #if folder does not exist
         os.makedirs(savePath)
-    df = pd.read_csv(filename, dtype = str)
-    df = df.where((pd.notnull(df)), None) #convert Pandas NaNs to None
-    df.columns = map(str.lower, df.columns)
-    numrows = len(df.index)
-    if "PID".lower() in df.columns:
-        download = True
-    if "IssueTitle".lower() in df.columns:
-        contentMod = "newsIssue" 
-    elif "dateissued_start" in df.columns:
-        contentMod = "newsSerial"
+  
+    try:
+        df = pd.read_csv(filename,dtype = "string", encoding = 'utf_8')
+    except UnicodeDecodeError:
+        df = pd.read_csv(filename,dtype = "string", encoding = 'utf_7')
+    
+    nullcols = dropNullCols(df)
+    df.drop(nullcols, axis=1, inplace=True)
+ 
+    df.columns = map(str.lower, df.columns) #accommodate case variations in column headings
 
+    if "BCRDHSimpleObjectPID".lower() in df.columns: #CSV data has been downloaded and resulting XML will correct existing Arca MODS
+        download = True
+        
     def clean(xmlStr):
-        newstr = xmlStr.replace("&","&amp;")
+        #replace non-utf-8 characters
+        newstr = xmlStr.replace("&","&amp;") #ampersand
+        newstr = re.sub(u"\u2013", "-", newstr) #en dash
+        newstr = re.sub(u"\u2018", "'", newstr) #curly left quotation mark
+        newstr = re.sub(u"\u2019", "'", newstr) #curly right quotation mark
+        newstr = re.sub(u"\ufffd","", newstr)# weird extraneous char occurring in hedley photographs stripped CSV
+        #newstr = re.sub(u"\x9d", '"',newstr)
         return(newstr)
 
-    def getOutputFilename(row,download):
-        if download:
-            pid = df.at[row, 'PID'.lower()]
-            if pid is not None:
-                fileName = df.at[row, 'PID'.lower()].replace(":","_") + ".xml"
-            else:
-                fileName = df.at[row, 'filename'][:-3] + "xml"
-                
+    def getOutputFilename(df, row,download):
+        if 'BCRDHSimpleObjectPID'.lower() in df.columns:
+            pid = df.loc[row, 'BCRDHSimpleObjectPID'.lower()]
+            fileName = pid.replace(":","_") + "_MODS.xml"
+        elif 'PID'.lower() in df.columns:
+            pid = df.loc[row, 'PID'.lower()]
+            fileName = pid.replace(":","_") + "_MODS.xml"     
         else:
             fileName = df.at[row, 'Filename'.lower()]
             if fileName ==None:
@@ -94,458 +153,304 @@ def convert():
             fileName = fileName.replace(ext,'.xml')
         fileName = os.path.join(savePath,fileName)
         return fileName
-    
-    ####____News Issue____####
-    
-    if contentMod == "newsIssue": #if we are converting newspaper issue metadata
-        for row in range(0,numrows):
-            if df.at[row,'issuetitle'] == None:
-                exit()
-            xmlString = '<?xml version="1.0" encoding="UTF-8"?><mods xmlns="http://www.loc.gov/mods/v3" xmlns:mods="http://www.loc.gov/mods/v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xlink="http://www.w3.org/1999/xlink">'
-            #Issue Title
-            issTitle = df.at[row,'issuetitle']
-            xmlString += '<titleInfo><title>' + issTitle + '</title></titleInfo>'
-            # CHANGED
-            date = df.at[row,'datecreated']
-            if date != None:
-            # CHANGED
-                xmlString += '<originInfo><dateIssued encoding="w3cdtf" keyDate="yes">' + date + '</dateIssued></originInfo>' 
-            
-            #Volume and Issue Info
-            vol = str(df.at[row,'volume'])
-            iss = str(df.at[row,'issue'])
-            if vol != None or iss != None:
-                xmlString += '<part>'
-                if vol != None:
-                    xmlString += '<detail type="volume"><number>' + vol + '</number></detail>'
-                if iss != None:
-                    xmlString += '<detail type="issue"><number>' + iss + '</number></detail>'
-                xmlString += '</part>'
-            
-            accessID = str(df.at[row,'identifier'])
-            if accessID != None:
-                xmlString += '<identifier type="access">' + accessID + '</identifier>'
-            
-            #****RECORD CREATION DATE / RECORD ORIGIN*****
-            xmlString += '<recordInfo><recordOrigin>'+ tool_version +'</recordOrigin><recordCreationDate>' + datetime.datetime.now().strftime('%Y-%m-%d') + '</recordCreationDate></recordInfo>'
-            xmlString += '</mods>'
-            xmlString = clean(xmlString)
-            fileName = df.at[row,'filename'][:-3] + "xml"
-            dest = os.path.join(savePath,fileName)
-            
-            try:
-                with open(dest, "wb") as f:
-                    f.write(xmlString.encode('utf8'))
-            except Exception as e:
-                print(str(e))
-                print("Write of " + fileName + " failed.")
+ 
+    for item in df.itertuples():
+        #****MODS TITLE INFO****
+        xmlString = '<?xml version="1.0" encoding="UTF-8"?><mods xmlns="http://www.loc.gov/mods/v3" xmlns:mods="http://www.loc.gov/mods/v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xlink="http://www.w3.org/1999/xlink">'
+
+        ti = None
+        if 'title' in df.columns:
+            ti = item.title
+            if pd.isna(ti):
+                ti = item.issuetitle
+        else:
+            ti = item.issuetitle
+  
+        if pd.notna(ti):
+            xmlString += '<titleInfo><title>' + ti + '</title></titleInfo>'
+        if 'alternativetitle' in df.columns:
+            altTi = item.alternativetitle
         
-        probFiles = validate(savePath)
-        if len(probFiles) > 0:
-            msg = "Unfortunately, the following files were not well formed:\n"
-            msg += "--------------------------------------------------------\n"
-            msg += " " + probFiles
-            messagebox.showinfo(title = 'XML Check', message = msg)
-        finalMsg = "Records have been written to the " + outputFldr + " folder on your desktop."
-        messagebox.showinfo(title = 'Conversion Finished', message = finalMsg)
-            
-    elif contentMod == "newsSerial":
-        for row in range(0,numrows):
-            if df.at[row,'title'] == None:
-                exit()
-            xmlString = '<?xml version="1.0" encoding="UTF-8"?><mods xmlns="http://www.loc.gov/mods/v3" xmlns:mods="http://www.loc.gov/mods/v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xlink="http://www.w3.org/1999/xlink">'
-            ti = df.at[row, 'Title'.lower()]
-            if ti != None:
-                xmlString += '<titleInfo><title>' + ti + '</title></titleInfo>'
-                
-            #****ORIGIN INFO*****    
-            xmlString += '<originInfo>'  #open OriginInfo
-            # CHANGED
-            pub = df.at[row,'publisher_original']
-            if pub is not None:
-                xmlString += '<publisher>' + pub + '</publisher>'
-            loc = df.at[row,'publisher_location']
-            if loc is not None:
-                xmlString += '<place><placeTerm type="text">' + loc + '</placeTerm></place>'
-            freq = df.at[row,"frequency"]
-            if freq != None:
-                xmlString += '<frequency>' + freq + '</frequency>'
-            dateStart = df.at[row,'dateissued_start']
-            dateEnd = df.at[row, 'dateissued_end']
-            if dateStart != None:
-                xmlString += '<dateIssued point="start">'+ dateStart +'</dateIssued>'
-                xmlString += '<dateIssued point="end">' + dateEnd + '</dateIssued>'
-            xmlString += '</originInfo>' #close OriginInfo
+            if pd.notna(altTi):
+                xmlString +='<titleInfo type = "alternative"><title>'+altTi + '</title></titleInfo>'
+        #****MODS ORGIN INFO****
 
-            # CHANGED
-            abs = df.at[row,'abstract']
-            if abs is not None:
-                xmlString += '<abstract>' + abs + '</abstract>'
-            # CHANGED
-            dtrng = df.at[row,'daterange']
-            if dtrng is not None:
-                xmlString += '<subject><temporal>' + dtrng + '</temporal></subject>'
-                   
-            # CHANGED
-            intMedia = df.at[row,'internetmediatype']
-            if intMedia is not None:
-                xmlString += '<physicalDescription><internetMediaType>' + intMedia + '</internetMediaType></physicalDescription>'
-            xmlString += '<typeOfResource>text</typeOfResource>'
-            lang = df.at[row,'language']
-            if lang:
-                xmlString += '<language>' + lang + '</language>'
-            xmlString += '<genre authority="aat">newspapers</genre>'
-            
-                            #****RIGHTS****
-            rts = df.at[row,'rights']
-            if rts != None:
-                xmlString += '<accessCondition type="use and reproduction" displayLabel="Restricted">' + rts + '</accessCondition>'
+        xmlString += '<originInfo>'
+   
+        date = item.datecreated
+        
+        if date is None:
+            date = "n.d."
+        xmlString += '<dateIssued keyDate="yes" encoding="w3cdtf">' + date + '</dateIssued>'
+        if "publisher_original" in df.columns:
+            pub = item.publisher_original
+            if pd.notna(pub): #no publisher
+                    xmlString += '<publisher>' + pub + '</publisher>'
+            if 'publisher_location' in df.columns:
+                publoc = item.publisher_location    
+                if publoc is not None:
+                    xmlString += '<place><placeTerm type="text">' + publoc + '</placeTerm></place>'
+         
+        xmlString += '</originInfo>'
 
-            #****RIGHTSSTATEMENT****
-            rStmt = df.at[row,'rightsstatement']
-            if rStmt == None:
-                rStmt = 'http://rightsstatements.org/vocab/CNE/1.0/'
-            xmlString += '<accessCondition type="use and reproduction" displayLabel="Rights Statement">' + rStmt + '</accessCondition>'
-            
-            
-            #****CREATIVECOMMONSURI****
-            if 'CreativeCommons_URI'.lower() in df.columns:
-                cc_uri = df.at[row, 'CreativeCommons_URI'.lower()]
-                if cc_uri != None:
-                    xmlString += '<accessCondition type="use and reproduction" displayLabel="Creative Commons license">' + cc_uri + '</accessCondition>'
-            
-            #****RECORD CREATION DATE / RECORD ORIGIN*****
-            xmlString += '<recordInfo><recordOrigin>'+ tool_version +'</recordOrigin><recordCreationDate>' + datetime.datetime.now().strftime('%Y-%m-%d') + '</recordCreationDate></recordInfo>'
-            xmlString += '</mods>'
-            
-            xmlString = clean(xmlString)
-            if download:
-                fileName = df.at[row,'pid'].replace(":","_") + ".xml"
-            else:
-                fileName = ti + ".xml"
-            dest = os.path.join(savePath,fileName)
-            
-            try:
-                with open(dest, "wb") as f:
-                    f.write(xmlString.encode('utf8'))
-            except Exception as e:
-                print(str(e))
-                print("Write of " + fileName + " failed.")
-                
-        probFiles = validate(savePath)    
-        if len(probFiles) > 0:
-            msg = "Unfortunately, the following files were not well formed:\n"
-            msg += "--------------------------------------------------------\n"
-            msg += " " + probFiles
-            messagebox.showinfo(title = 'XML Check', message = msg)
-        finalMsg = "Records have been written to the " + outputFldr + " folder on your desktop."
-        messagebox.showinfo(title = 'Conversion Finished', message = finalMsg)
-            
-    else:
-        psHeadings = df.filter(regex='subject[0-9]+_[gf][ia]').columns #find SubjectX_Given or ...Family
-        numPSubs = math.ceil((len(psHeadings))/2) # of personal subjects
-        numRows = len(df.index)
-
-        for row in range(0,numRows):
-            if df.at[row,'title'] == None:
-                exit()
-            
-            #****MODS TITLE INFO****
-            xmlString = '<?xml version="1.0" encoding="UTF-8"?><mods xmlns="http://www.loc.gov/mods/v3" xmlns:mods="http://www.loc.gov/mods/v3" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xlink="http://www.w3.org/1999/xlink">'
-            ti = df.at[row, 'Title'.lower()]
-            if ti != None:
-                xmlString += '<titleInfo><title>' + ti + '</title></titleInfo>'
-            altTi = None
-            if 'AlternativeTitle'.lower() in df.columns:
-                altTi = df.at[row, 'AlternativeTitle'.lower()]
-            if altTi != None:
-                xmlString += '<titleInfo type = "alternative"><title>' + altTi + '</title></titleInfo>'
-            
-            #****MODS ORGIN INFO****
-            date = None
-            if 'datecreated' in df.columns:
-                date = str(df.at[row, 'DateCreated'.lower()])
-            pub = None
-            pub_location = None
-            if date == None:
-                date = "n.d."
-            if 'Publisher_Original'.lower() in df.columns:
-                pub = df.at[row, 'Publisher_Original'.lower()]
-            if 'Publisher_Location'.lower() in df.columns:
-                pub_location = df.at[row, 'Publisher_Location'.lower()]
-
-            if pub==None: #no publisher
-                xmlString += '<originInfo><dateIssued encoding="w3cdtf" keyDate="yes">' + date + '</dateIssued></originInfo>'
-            else:
-                xmlString += '<originInfo><publisher>' + pub + '</publisher>'
-                if pub_location !=None:
-                    xmlString += '<place><placeTerm type="text">' + pub_location + '</placeTerm></place>'
-                xmlString += '<dateIssued keyDate="yes" encoding="w3cdtf">' + date + '</dateIssued></originInfo>'
-
-            #****PERSONAL_SUBJECTS****
-            for i in range (1, numPSubs + 1):
-                fnHdg = "Subject" + str(i) + "_Family"
-                gnHdg = "Subject" + str(i) + "_Given"
-                fnHdg = fnHdg.lower()
-                gnHdg = gnHdg.lower()
-                fn = df.at[row,fnHdg]
-                gn = df.at[row,gnHdg]
-                if fn == None and gn == None:
+        #****PERSONAL_SUBJECTS****
+        hdgs = df.filter(like="personalsubject").columns
+        if len(hdgs) > 0:
+            for hdg in hdgs:
+                ps = df.at[item.Index,hdg]
+                if pd.isna(ps):
+                    break 
+                else:                    
+                    xmlString += '<subject><name type="personal"><namePart>' + ps + '</namePart></name></subject>'
+    
+        #****CREATORS****
+        hdgs = df.filter(regex='^creator[1-9]').columns
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "creator" + str(j)
+                pc =  df.at[item.Index,hdg]
+                if pd.isna(pc):
                     break
                 else:
-                    xmlString += '<subject><name type="personal">'
-                    if fn != None:
-                        xmlString += '<namePart type="family">' + fn + '</namePart>'
-                    if gn != None:
-                        xmlString += '<namePart type="given">' + gn + '</namePart>'
+                    xmlString += '<name type = "personal"><namePart>' + pc + '</namePart><role><roleTerm type="text" authority="marcrelator">creator</roleTerm></role></name>' 
+           
+        #****CONTRIBUTORS****
+        hdgs = df.filter(regex='^contributor[1-9]').columns #find up to 9 personal contributors
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "contributor" + str(j)
+                pcon =  df.at[item.Index,hdg]
+                if pd.isna(pcon):
+                    break
+                else:
+                    xmlString += '<name type = "personal"><namePart>' + pcon + '</namePart><role><roleTerm type="text" authority="marcrelator">contributor</roleTerm></role></name>' 
+         
+        #****CORPORATE CONTRIBUTOR****
+        hdgs = df.filter(like="corporatecontributor").columns
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "corporatecontributor" + str(j)     
+                corpco = df.at[item.Index,hdg]
+                if pd.isna(corpco):
+                    break
+                else:
+                    xmlString += '<name type="corporate"><namePart>' + corpco + '</namePart><role><roleTerm type="text" authority="marcrelator">creator</roleTerm></role></name>'
+        
+            
+        #****CORPORATE CREATOR****
+        hdgs = df.filter(like="corporatecreator").columns
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "corporatecreator" + str(j)
+                corpcr =  df.at[item.Index,hdg]
+                if pd.isna(corpcr):
+                    break
+                else:
+                    xmlString += '<name type="corporate"><namePart>' + corpcr + '</namePart><role><roleTerm type="text" authority="marcrelator">creator</roleTerm></role></name>'
+      
+        #****CORPORATE SUBJECT****
+        hdgs = df.filter(like="corporatesubject").columns
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "corporatesubject" + str(j)
+                corpsub =  df.at[item.Index,hdg]
+                if pd.isna(corpsub):
+                    break
+                else:
+                    xmlString += '<subject><name type="corporate"><namePart>' + corpsub + '</namePart></name></subject>'
 
-                    xmlString += '</name></subject>'
-
-            # CHANGED
-            #****CREATORS****
-            for x in range(1, 4):
-                family_column = 'Creator' + str(x) + '_Family'
-                given_column = 'Creator' + str(x) + '_Given'
-                if family_column.lower() in df.columns:
-                    creator_family = df.at[row, family_column.lower()]
-                    if creator_family is not None:
-                        xmlString +=\
-                        '<name type = "personal"><namePart type ="family">' + creator_family + '</namePart>'
-                        xmlString +=\
-                        '<namePart type ="given">' + df.at[row, given_column.lower()] + '</namePart><role><roleTerm type="text" authority="marcrelator">creator</roleTerm></role></name>'
-
-            # CHANGED - I changed this, as cont_family had been put in the given namePart and cont_given in the family namePart. - sh
-            #****CONTRIBUTORS****
-            for x in range(1, 3):
-                cont_family_col = 'Contributor' + str(x) + '_Family'
-                cont_given_col = 'Contributor' + str(x) + '_Given'
-                if cont_family_col.lower() in df.columns:
-                    cont_family = df.at[row, cont_family_col.lower()]
-                    if cont_family is not None:
-                        xmlString += \
-                        '<name type = "personal"><namePart type="family">' + cont_family + '</namePart>'
-                        xmlString += \
-                        '<namePart type="given">' + df.at[row, cont_given_col.lower()] + '</namePart><role><roleTerm type="text" authority="marcrelator">contributor</roleTerm></role></name>'
-            # CHANGED
-            #****CORPORATE CONTRIBUTOR****
-            if 'CorporateContributor'.lower() in df.columns:
-                corpCo = df.at[row, 'CorporateContributor'.lower()]
-                if corpCo is not None:
-                    xmlString += '<name type="corporate"><namePart>'+corpCo+'</namePart><role><roleTerm type="text" authority="marcrelator">contributor</roleTerm></role></name>'
-            #****CORPORATE CREATOR****
-            corpCr = None
-            if 'CorporateCreator'.lower() in df.columns:
-                corpCr = df.at[row, 'CorporateCreator'.lower()]
-            if corpCr != None:
-                xmlString += '<name type="corporate"><namePart>' + corpCr + '</namePart><role><roleTerm authority="marcrelator">creator</roleTerm></role></name>'
-
-            # CHANGED
-            #****CORPORATE SUBJECT****
-            for x in range(1, 3):
-                corp_subj_col = 'CorporateSubject_' + str(x)
-                if corp_subj_col.lower() in df.columns:
-                    corp_subj = df.at[row, corp_subj_col.lower()]
-                    if corp_subj is not None:
-                        xmlString += \
-                       '<subject><name type="corporate"><namePart>' + corp_subj + '</namePart><role></name></subject>'
-
-
-            #****PHYSICAL DESCRIPTION (EXTENT & NOTES)****
-            extent = df.at[row, 'Extent'.lower()]
-            if extent != None:
+        #****PHYSICAL DESCRIPTION (EXTENT & NOTES)****
+        if 'extent' in df.columns:
+            extent = item.extent
+            if pd.notna(extent):
                 xmlString += '<physicalDescription><extent>' + extent + '</extent></physicalDescription>'
 
-            #****ABSTRACT/DESCRIPTION****
-            descr = df.at[row, 'Description'.lower()]
-            if descr != None:
+        #****ABSTRACT/DESCRIPTION****
+        if 'description' in df.columns:
+            descr = item.description
+            if pd.notna(descr):
                 xmlString += '<abstract>' + descr + '</abstract>'
 
-            #****TOPICAL SUBJECTS
-            #topicHdgs = df.filter(regex='Subject[0-9]+_Topic').columns
-            topicHdgs = df.filter(like="topic").columns
-            numTopSubs = len(topicHdgs)
-            for j in range(1,numTopSubs + 1):
-                topHdg = "Subject" + str(j) + "_Topic"
-                topHdg = topHdg.lower() # changed - SH
-                top = df.at[row,topHdg]
-                if top == None:
+        #****TOPICAL SUBJECTS
+        hdgs = df.filter(like="topicalsubject").columns
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "topicalsubject" + str(j)
+                top = df.at[item.Index,hdg]
+                if pd.isna(top):
                     break
                 else:
                     xmlString += '<subject><topic>' + top + '</topic></subject>'
-
-            #****CORPORATE SUBJECT****
-            corpSub = None
-            corpSub1 = None
-            corpSub2 = None
-            if 'CorporateSubject'.lower() in df.columns:
-                corpSub = df.at[row, 'CorporateSubject'.lower()]
-            elif 'CorporateSubject_1'.lower() in df.columns:
-                corpSub1 = df.at[row, 'CorporateSubject_1'.lower()]
-                if 'CorporateSubject_2'.lower() in df.columns:
-                    corpSub2 = df.at[row, 'CorporateSubject_2'.lower()]
-            if corpSub != None:
-                xmlString += '<subject><name type="corporate"><namePart>' + corpSub + '</namePart></name></subject>'
-            if corpSub1 != None:
-                xmlString += '<subject><name type="corporate"><namePart>' + corpSub1 + '</namePart></name></subject>'
-            if corpSub2 != None:
-                xmlString += '<subject><name type="corporate"><namePart>' + corpSub2 + '</namePart></name></subject>'
-
-            #****COORDINATES****
-            coords = None
-            if 'Coordinates'.lower() in df.columns:
-                coords = df.at[row, 'Coordinates'.lower()]
-            if coords != None:
-                # CHANGED
+     
+        #****COORDINATES****
+        if 'coordinates' in df.columns:
+            coords = item.coordinates
+            if pd.notna(coords):
                 xmlString += '<subject><geographic><cartographics>' + coords + '</cartographics></geographic></subject>'
 
-            # CHANGED
-            #****GEOGRAPHIC SUBJECT****
-            if 'Subject_Geographic'.lower() in df.columns:
-                geoSub = df.at[row, 'Subject_Geographic'.lower()]
-                if geoSub != None:
-                    xmlString += '<subject><geographic>' + geoSub + '</geographic></subject>'
-            else:
-                geographic_columns = df.filter(regex='subject[0-9]+_geographic').columns
-                num_geographic_columns = len(geographic_columns)
-                for j in range(1, num_geographic_columns + 1):
-                    geographic_column = 'Subject' + str(j) + '_Geographic'
-                    geographic_value = df.at[row, geographic_column.lower()]
-                    if geographic_value is not None:
-                        xmlString += \
-                            '<subject><geographic>' + geographic_value + '</geographic></subject>'                
-                            
-            #****TEMPORAL SUBJECT****
-            dtrng = df.at[row,'daterange']
-            if dtrng is not None:
+        #****GEOGRAPHIC SUBJECT****
+        hdgs = df.filter(like="geographicsubject").columns
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "geographicsubject" + str(j)
+                geoSub = df.at[item.Index,hdg]
+                if pd.isna(geoSub):
+                    break
+                else:
+                    xmlString += '<subject><geographic>' + geoSub + '</geographic></subject>'    
+                        
+        #****TEMPORAL SUBJECT****
+        if 'daterange' in df.columns:
+            dtrng = item.daterange
+            if pd.notna(dtrng):
                 xmlString += '<subject><temporal>' + dtrng + '</temporal></subject>'
 
-            #****LANGUAGE****
-            if 'Language'.lower() in df.columns:
-                if df.at[row, 'Language'.lower()] != None:
-                    lang = df.at[row, 'Language'.lower()]
-                    xmlString += '<languageTerm type="text">' + lang + '</languageTerm>'
+        #****LANGUAGE****
+        hdgs = df.filter(like="language").columns
+        numHdgs = len(hdgs)
+        if numHdgs > 0:
+            for j in range(1,numHdgs + 1):
+                hdg = "language" + str(j)
+                lang = df.at[item.Index,hdg]
+                if pd.isna(lang):
+                    break
                 else:
-                    xmlString += '<languageTerm type="text">English</languageTerm>'
+                    xmlString += '<language><languageTerm>' + lang + '</languageTerm></language>' 
 
-            # CHANGED
-            #****GENRE / GENRE AUTHORITY****
-            genre = None
-            genre_authority = None
-            if 'Genre'.lower() in df.columns:
-                genre = df.at[row, 'Genre'.lower()]
-            if 'GenreAuthority'.lower() in df.columns:
-                genre_authority = df.at[row, 'GenreAuthority'.lower()]
+        #****NOTES****
+        if 'notes' in df.columns:
+            notes = item.notes
+            if pd.notna(notes):
+                xmlString += '<note>' + notes + '</note>'
+        
+        #****GENRE / GENRE AUTHORITY****
+        if 'genre' in df.columns:
+            genre = item.genre
+            if pd.notna(genre):
+                if 'genreauthority' in df.columns:
+                    auth = item.genreauthority
+                    if pd.notna(auth):
+                        xmlString += '<genre authority="' + auth.lower() + '">' + genre + '</genre>'
+                    else:
+                        xmlString += '<genre>' + genre + '</genre>' 
+                else:
+                    xmlString += '<genre>' + genre + '</genre>' 
+        #****TYPE****
+        if 'type' in df.columns:
+            type_ = item.type
+            if pd.notna(type_):
+                xmlString += '<typeOfResource>' + type_ + '</typeOfResource>'
+  
+        #****INTERNET MEDIA TYPE****
+        if 'internetmediatype' in df.columns:
+            imt = item.internetmediatype
+            if pd.notna(imt):
+                xmlString += '<physicalDescription><internetMediaType>' + imt + '</internetMediaType></physicalDescription>'
 
-            if (genre is not None) and (genre_authority is not None):
-                # CHANGED
-                #xmlString += '<genre authority="aat">' + g + '</genre>'
-                xmlString += '<genre authority="' + genre_authority.lower() + '">' + genre + '</genre>' #changed to put genre auth in lower case -sh
-
-            #****TYPE****
-            if 'Type'.lower() in df.columns:
-                type_ = df.at[row, 'Type'.lower()]
-                if type_ != None:
-                    xmlString += '<typeOfResource>' + type_ + '</typeOfResource>'
-
-            #****INTERNET MEDIA TYPE****
-            if 'internetMediaType'.lower() in df.columns:
-                imt = df.at[row, 'internetMediaType'.lower()]
-                if imt != None:
-                    # CHANGED
-                    xmlString +=  \
-                        '<physicalDescription><internetMediaType>' + imt + '</internetMediaType></physicalDescription>'
-
-
-            #****IDENTIFIERS****'
-            aI = df.at[row, 'AccessIdentifier'.lower()]
-            lI = df.at[row, 'LocalIdentifier'.lower()]
-            if aI !=None:
+        #****IDENTIFIERS****
+        if 'accessidentifier' in df.columns:
+            aI = item.accessidentifier
+            if pd.notna(aI):
                 xmlString += '<identifier type="access">' + aI + '</identifier>'
-            if lI != None:
+                
+        if 'localidentifier' in df.columns:        
+            lI = item.localidentifier
+            if pd.notna(lI):
                 xmlString += '<identifier type="local">' + lI + '</identifier>'
-            if 'URI'.lower() in df.columns:
-                uri = df.at[row, 'URI'.lower()]
-                if uri != None:
-                    xmlString += '<identifier type="uri">' + uri + '</identifier>'
+        
+        if 'URI'.lower() in df.columns:
+            uri = item.uri
+            if pd.notna(uri):
+                xmlString += '<identifier type="uri">' + uri + '</identifier>'
+   
+        #****CLASSIFICATION****
+        if 'classification' in df.columns:
+            classif = item.classification
+            if pd.notna(classif):
+                xmlString += '<classification authority="lcc">' + classif + '</classification>'
 
-            #****CLASSIFICATION****
-            if 'Classification'.lower() in df.columns:
-                classif = df.at[row, "Classification".lower()]
-                if classif != None:
-                    xmlString += '<classification authority="lcc">' + classif + '</classification>'
-
-            #****SOURCE****
-            source = df.at[row, 'Source'.lower()]
-            if source != None:
-                xmlString += '<location><physicalLocation>' + df.at[row, 'Source'.lower()] + '</physicalLocation></location>'
-
-            #****ISBN****
-            # CHANGED
-            if 'ISBN'.lower() in df.columns:
-                isbn = df.at[row, 'ISBN'.lower()]
-                if isbn is not None:
-                    xmlString += '<identifier type="isbn">' + isbn + "</identifier>"
-
-            #****RIGHTS****
-            rts = df.at[row, 'Rights'.lower()]
-            if rts != None:
+        #****SOURCE****
+        if 'source' in df.columns:
+            source = item.source
+            if pd.notna(source):
+                xmlString += '<location><physicalLocation>' + source + '</physicalLocation></location>'
+        
+        #****ISBN****
+        if 'isbn' in df.columns:
+            isbn = item.isbn
+            if pd.notna(isbn):
+                xmlString += '<identifier type="isbn">' + isbn + '</identifier>'
+          
+        #****RIGHTS****
+        if 'rights' in df.columns:
+            rts = item.rights
+            if pd.notna(rts):
                 xmlString += '<accessCondition type="use and reproduction" displayLabel="Restricted">' + rts + '</accessCondition>'
 
-            #****RIGHTSSTATEMENT****
-            rStmt = df.at[row, 'RightsStatement'.lower()]
-            if rStmt == None:
+        #****RIGHTSSTATEMENT****
+        if 'rightsstatement_uri' in df.columns:
+            rStmt = item.rightsstatement_uri
+            if pd.isna(rStmt):
                 rStmt = 'http://rightsstatements.org/vocab/CNE/1.0/'
             xmlString += '<accessCondition type="use and reproduction" displayLabel="Rights Statement">' + rStmt + '</accessCondition>'
-            
 
-            #****CREATIVECOMMONS_URI****
-            if 'CreativeCommons_URI'.lower() in df.columns:
-                cc_uri = df.at[row, 'CreativeCommons_URI'.lower()]
-                if cc_uri != None:
-                    xmlString += '<accessCondition type="use and reproduction" displayLabel="Creative Commons license">' + cc_uri + '</accessCondition>'
-
-            # CHANGEd
-            #****RECORD CREATION DATE / RECORD ORIGIN*****
-            xmlString += '<recordInfo><recordOrigin>'+ tool_version +'</recordOrigin><recordCreationDate>' + datetime.datetime.now().strftime('%Y-%m-%d') + '</recordCreationDate></recordInfo>'
-            # CHANGED
-            #****RELATEDITEM****
-            if 'relatedItem_Title'.lower() in df.columns:
-                related_item_title = df.at[row, 'relatedItem_Title'.lower()]
-                if related_item_title is not None:
-                    xmlString += \
-                        '<relatedItem type="host"><titleInfo><title>'+ related_item_title +'</title></titleInfo></relatedItem>'
-            if 'relatedItem_PID'.lower() in df.columns:
-                related_item_pid = df.at[row, 'relatedItem_PID'.lower()]
-                if related_item_pid is not None:
-                    xmlString += \
-                        '<relatedItem type="host"><identifier type="PID">'+ related_item_pid +'</identifier></relatedItem>'
-
-
-            #****TAIL****
-            xmlString += '</mods>'
-            xmlString = clean(xmlString)
-            fileName = getOutputFilename(row, download)
-            dest = os.path.join(savePath,fileName)
-            
-            try:
-                with open(dest, "wb") as f:
-                    f.write(xmlString.encode('utf8'))
-            except Exception as e:
-                print(str(e))
-                print("Write of " + fileName + " failed.")
+        if 'creativecommons_uri' in df.columns:
+            cc_uri = item.creativecommons_uri
+            if pd.notna(cc_uri):
+                xmlString += '<accessCondition type="use and reproduction" displayLabel="Creative Commons license">' + cc_uri + '</accessCondition>'
+       
+        #****RECORD CREATION DATE / RECORD ORIGIN*****
+        xmlString += '<recordInfo><recordOrigin>'+ tool_version +'</recordOrigin><recordCreationDate keyDate="yes" encoding="w3cdtf">' + datetime.datetime.now().strftime('%Y-%m-%d') + '</recordCreationDate></recordInfo>'
         
-        probFiles = validate(savePath)    
-        if len(probFiles) > 0:
-            msg = "Unfortunately, the following files were not well formed:\n"
-            msg += "--------------------------------------------------------\n"
-            msg += " " + probFiles
-            messagebox.showinfo(title = 'XML Check', message = msg)
-        finalMsg = "Records have been written to the " + outputFldr + " folder on your desktop."
-        messagebox.showinfo(title = 'Conversion Finished', message = finalMsg)
+        #****RELATEDITEM****
+        if 'relatedItem_Title'.lower() in df.columns:
+            related_item_title = item.relateditem_title
+            if pd.notna(related_item_title):
+                xmlString += \
+                    '<relatedItem type="host"><titleInfo><title>'+ related_item_title +'</title></titleInfo></relatedItem>'
+        if 'relatedItem_PID'.lower() in df.columns:
+            related_item_pid = item.relateditem_pid
+            if pd.notna(related_item_pid):
+                xmlString += \
+                    '<relatedItem type="host"><identifier type="PID">'+ related_item_pid +'</identifier></relatedItem>'
+        
+        #****TAIL****
+        xmlString += '</mods>'
+ 
+        xmlString = clean(xmlString)
+        fileName = getOutputFilename(df, item.Index, download)
+        dest = os.path.join(savePath,fileName)
+      
+        xmlstr = xml.dom.minidom.parseString(xmlString)  # or xml.dom.minidom.parseString(xml_string)
+        xml_pretty_str = xmlstr.toprettyxml()
+      
+        try:
+            with open(dest, "w") as f:
+                f.write(xml_pretty_str)
+        except Exception as e:
+            probFiles += "\n" + str(os.path.basename(dest)) + "could not be written: " + str(e)
+
+         
+    if len(probFiles) > 0:
+        msg = "Unfortunately, the following files either were not well formed\nor could not be written by the program:"
+        msg += "--------------------------------------------------------\n"
+        msg += " " + probFiles
+        messagebox.showinfo(title = 'Conversion Report: Errors', message = msg)
+    finalMsg = "Records have been written to the " + outputFldr + " folder on your desktop."
+    messagebox.showinfo(title = 'Conversion Finished', message = finalMsg)
+
 
 
 def getOutputFolder():
         return(output.get())
+probFiles = ''
 
 root = Tk()
 
@@ -554,9 +459,9 @@ root.title = "CSV -> XML"
 root.configure(background='#DAE6F0')
 folder_path = StringVar()
 
-intro = ttk.Label(master=root,text="Arca_CSVtoXML Version 4.3.1", background='#DAE6F0',font="Arial 15 bold")
+intro = ttk.Label(master=root,text="Arca_CSVtoXML Version 5.0.0", background='#DAE6F0',font="Arial 15 bold")
 intro.grid(row=0,column=1,padx=(10,0),sticky='w')
-info = ttk.Label(master=root,text="This app can be used with audio, book, large image, newspaper,\nnewspaper issue, PDF, and video content models.", background='#DAE6F0',font="Arial 9 bold")
+info = ttk.Label(master=root,text="**Use with metadata format 18-6 (single-field personal names)!**\nThis app can be used with audio, book, large image, newspaper,\nnewspaper issue, PDF, and video content models. It can\nproduce XML both for initial ingest and for revision of existing\nArca MODS, and will auto-detect the intended use.", background='#DAE6F0',font="Arial 9 bold")
 info.grid(row=1,column=1,padx=(10,0),sticky='w')
 
 
